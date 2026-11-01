@@ -61,7 +61,10 @@ setInterval(()=>{if(session&&data&&!busy&&!$('#detail').open&&!document.hidden&&
 // استعادة كلمة المرور: رموز الرابط لا تحفظ في الملفات أو السجل المحلي.
 let recoveryToken=null;
 const hashParams=new URLSearchParams(location.hash.slice(1));
-const recovering=['recovery','invite'].includes(hashParams.get('type'));
+const queryParams=new URLSearchParams(location.search);
+const tokenHash=queryParams.get('token_hash');
+const linkType=tokenHash?queryParams.get('type'):hashParams.get('type');
+const recovering=['recovery','invite'].includes(linkType);
 function authError(j){
  if(j.error_code==='over_email_send_rate_limit'||j.code==='over_email_send_rate_limit')return 'وصل إرسال البريد إلى الحد المسموح. انتظري ثم أعيدي المحاولة، أو راجعي إعداد SMTP في Supabase.';
  return j.error_description||j.msg||j.message||'تعذر إكمال الطلب. أعيدي المحاولة.';
@@ -88,8 +91,15 @@ $('#recoveryForm').onsubmit=e=>{e.preventDefault();run(async()=>{
 });};
 async function initialize(){
  if(recovering){
-  const token=hashParams.get('access_token');
-  history.replaceState(null,'',location.pathname+location.search);
+  let token=hashParams.get('access_token');
+  history.replaceState(null,'',location.pathname);
+  if(tokenHash){
+   // رابط البريد على دومين الموقع نفسه: نتحقق من الرمز هنا بدل رابط supabase.co
+   const v=await fetch(cfg.supabaseUrl.replace(/\/$/,'')+'/auth/v1/verify',{method:'POST',headers:{apikey:cfg.supabaseKey,'Content-Type':'application/json'},body:JSON.stringify({type:linkType,token_hash:tokenHash})});
+   const vj=await v.json().catch(()=>({}));
+   if(!v.ok||!vj.access_token){$('#login').hidden=false;throw Error('رابط التعيين منتهي أو سبق استخدامه. اطلبي رسالة جديدة.');}
+   token=vj.access_token;
+  }
   session=null;data=null;sessionStorage.removeItem(key);$('#login').hidden=true;$('#app').hidden=true;$('#logout').hidden=true;
   if(!token){$('#login').hidden=false;throw Error('رابط الاستعادة غير مكتمل. اطلبي رسالة جديدة.');}
   const r=await fetch(cfg.supabaseUrl.replace(/\/$/,'')+'/auth/v1/user',{headers:{apikey:cfg.supabaseKey,Authorization:'Bearer '+token}});
