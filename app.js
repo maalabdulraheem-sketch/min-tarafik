@@ -19,16 +19,39 @@ async function rpc(action,payload={}){
 async function run(fn){if(busy)return;busy=true;const priorButtons=Array.from(document.querySelectorAll('button')).map(b=>[b,b.disabled]);priorButtons.forEach(([b])=>b.disabled=true);try{notice('');await fn();}catch(e){notice(e.message)}finally{busy=false;priorButtons.forEach(([b,disabled])=>{if(b.isConnected)b.disabled=disabled})}}
 async function load(){data=await rpc('load');render();}
 function render(){
- $('#login').hidden=true;$('#app').hidden=false;$('#logout').hidden=false;$('#greeting').textContent='أهلًا '+data.me.name;$('#sync').textContent='آخر تحديث: '+date(new Date());$('#closing').textContent='إقفال احتساب السداد: '+data.campaign.close_at;$('#addPanel').hidden=!role('employee');$('#admin').hidden=!role('admin');
+ $('#login').hidden=true;$('#app').hidden=false;$('#logout').hidden=false;$('#greeting').textContent='أهلًا '+data.me.name;$('#sync').textContent='آخر تحديث: '+date(new Date());$('#closing').textContent='إقفال احتساب السداد: '+data.campaign.close_at;$('#addPanel').hidden=!role('employee')||earnedCount(data.me.id)>=10;$('#admin').hidden=!role('admin');
  const own=data.referrals.filter(r=>r.employee_id===data.me.id),count=own.filter(r=>r.approved_at&&!r.voided).length,days=Math.min(2,Math.floor(count/5));
- $('#metrics').innerHTML=[['إحالاتي المسجلة',own.length,'مسجلة مسبقًا'],['تسجيلاتي المحتسبة',count,'بعد السداد والاعتماد'],['أيام الإجازة المستحقة',days,'بحد أعلى يومين'],['المتبقي لبلوغ ١٠',Math.max(0,10-count),'تسجيلات مكتملة ومحتسبة']].map(([t,n,s])=>`<article class="metric">${t}<strong>${num(n)}</strong><small>${s}</small></article>`).join('');
+ $('#metrics').innerHTML=[['إحالاتي المسجلة',own.length,'مسجلة مسبقًا'],['تسجيلاتي المحتسبة',count,'بعد السداد والاعتماد'],['أيام الإجازة المتبقية',Math.max(0,days-(data.me.leave_used||0)),'المستحق '+num(days)+' · المستخدم '+num(data.me.leave_used||0)],[count>=10?'المشاركة مكتملة':'المتبقي لبلوغ ١٠',Math.max(0,10-count),count>=10?'اكتملت ١٠ إحالات معتمدة':'تسجيلات مكتملة ومحتسبة']].map(([t,n,s])=>`<article class="metric">${t}<strong>${num(n)}</strong><small>${s}</small></article>`).join('');
  renderRows();
  setupViews();
  if(role('admin')){
- $('#balances').innerHTML='<table><thead><tr><th>الموظفة</th><th>الإحالات</th><th>الانتظار</th><th>المحتسبة</th><th>أيام الإجازة</th></tr></thead><tbody>'+data.profiles.filter(p=>p.roles.includes('employee')).map(p=>{const a=data.referrals.filter(r=>r.employee_id===p.id&&!r.voided),n=a.filter(r=>r.approved_at).length;return `<tr><td>${esc(p.name)}</td><td>${num(a.length)}</td><td>${num(a.filter(r=>r.status==='waiting').length)}</td><td>${num(n)}</td><td>${num(Math.min(2,Math.floor(n/5)))}</td></tr>`}).join('')+'</tbody></table>';
+ renderBalances();
+ scheduleRewardMail();
  $('#campaignForm [name=close_at]').value=data.campaign.close_at;
  }
 }
+
+let balanceView='active',mailBusy=false,lastMailCheck=0;
+function earnedCount(id){return data.referrals.filter(r=>r.employee_id===id&&!r.voided&&r.approved_at).length;}
+function eligibleBalance(p){return p.active&&!p.deleted_at&&p.roles.includes('employee');}
+function renderBalances(){
+ const profiles=data.profiles.filter(eligibleBalance).filter(p=>balanceView==='all'||(balanceView==='complete'?earnedCount(p.id)>=10:earnedCount(p.id)<10));
+ $('#balances').innerHTML=`<label>عرض المشاركات<select id="balanceFilter"><option value="active">المشاركة فعالة</option><option value="complete">مكتملة: ١٠ إحالات</option><option value="all">الفعالات والمكتملات</option></select></label><p>اكتمال المشاركة يوقف إضافة إحالات جديدة، ولا يوقف حساب الدخول. الحسابات المحذوفة والموقوفة مستبعدة من الأرصدة.</p><button id="retryRewardMail" type="button">معالجة إشعارات الرصيد المعلقة</button><p id="rewardMailStatus" role="status"></p><table><thead><tr><th>الموظفة</th><th>المشاركة</th><th>المحتسبة</th><th>المستحق</th><th>المستخدم</th><th>المتبقي</th><th>الاستنفاذ</th></tr></thead><tbody>${profiles.map(p=>{
+ const n=earnedCount(p.id),earned=Math.min(2,Math.floor(n/5)),used=p.leave_used||0,left=Math.max(0,earned-used);
+ return `<tr><td>${esc(p.name)}<small dir="ltr">${esc(p.email||'')}</small></td><td>${n>=10?'مكتملة: ١٠ إحالات':'فعالة'}</td><td>${num(n)}</td><td>${num(earned)}</td><td><select data-use-leave="${p.id}" aria-label="الأيام المستخدمة للموظفة ${esc(p.name)}">${Array.from({length:Math.max(earned,used)+1},(_,i)=>`<option value="${i}" ${i===used?'selected':''} ${i>earned?'disabled':''}>${num(i)}</option>`).join('')}</select><button data-save-leave="${p.id}">حفظ</button></td><td>${num(left)}</td><td>${used>earned?'يلزم مراجعة: المستخدم أكبر من الاستحقاق':earned===0?'لا يوجد رصيد':left===0?'تم الاستنفاذ':used?'مستنفذ جزئيًا':'لم يُستنفذ'}</td></tr>`;
+ }).join('')||'<tr><td colspan="7">لا توجد مشاركات في هذا العرض.</td></tr>'}</tbody></table>`;
+ $('#balanceFilter').value=balanceView;$('#balanceFilter').onchange=e=>{balanceView=e.target.value;renderBalances();};
+ $('#balances').onclick=e=>{const b=e.target.closest('[data-save-leave]');if(!b)return;run(async()=>{const id=b.dataset.saveLeave,days=$('#balances').querySelector(`[data-use-leave="${id}"]`).value;await rpc('leave_used',{employee_id:id,days});await load();notice('تم حفظ الأيام المستخدمة والمتبقية.');});};
+ $('#retryRewardMail').onclick=()=>processRewardMail(true);
+}
+async function processRewardMail(manual=false){
+ if(mailBusy||!session||!role('admin'))return;mailBusy=true;lastMailCheck=Date.now();
+ try{const r=await fetch(cfg.supabaseUrl.replace(/\/$/,'')+'/functions/v1/reward-notifications',{method:'POST',headers:{apikey:cfg.supabaseKey,Authorization:'Bearer '+session.access_token,'Content-Type':'application/json'},body:'{}'});const j=await r.json();if(!r.ok)throw Error(j.error||'تعذر إرسال إشعارات الرصيد.');if($('#rewardMailStatus'))$('#rewardMailStatus').textContent=j.message+(j.sent?' عدد الرسائل المقبولة: '+num(j.sent):'');}
+ catch(e){if(manual&&$('#rewardMailStatus'))$('#rewardMailStatus').textContent=e.message;}
+ finally{mailBusy=false;}
+}
+function scheduleRewardMail(){if(Date.now()-lastMailCheck>60000)setTimeout(()=>processRewardMail(),0);}
+
 function filtered(){const q=$('#search').value.trim().toLowerCase(),f=$('#filter').value;return data.referrals.filter(r=>(!q||[r.trainee,r.identity_name,staff()?r.national_id:'',r.phone,r.code,r.employee_name].join(' ').toLowerCase().includes(q))&&(!f||(f==='unpaid'?r.attendance_at&&r.status!=='paid'&&!r.voided:f==='unchecked'?r.attendance_at&&r.status!=='paid'&&!r.voided&&!r.payment_checked_at:f==='approved'?r.approved_at&&!r.voided:f==='voided'?r.voided:!r.voided&&!r.approved_at&&r.status===f)));}
 function renderRows(){$('#rows').innerHTML=filtered().map(r=>`<tr><td>${num(r.code)}</td><td>${esc(r.trainee)}<small dir="ltr">${esc(r.phone)}</small></td><td>${esc(r.employee_name)}</td><td>${date(r.created_at)}</td><td>${r.program?esc(r.program)+' ساعات':'لم يُحدد بعد'}</td><td><span class="badge ${r.approved_at&&!r.voided?'ok':''}">${state(r)}</span></td><td><button data-id="${r.id}">فتح</button></td></tr>`).join('')||'<tr><td colspan="7">لا توجد إحالات مطابقة.</td></tr>';}
 function show(id){current=data.referrals.find(r=>r.id===id);const r=current;let html=`<h2>إحالة رقم ${num(r.code)}</h2><p>${esc(r.trainee)} | <bdi>${esc(r.phone)}</bdi><br>صاحبة الإحالة: <b>${esc(r.employee_name)}</b><br>وقت التسجيل: ${date(r.created_at)}<br>الحالة: ${state(r)}</p><div class="audit">الحضور: ${r.attendance_at?date(r.attendance_at):'لم يُؤكد بعد'}<br>الاسم حسب الهوية: ${esc(r.identity_name||'يُسجل عند الحضور')}<br>${staff()?`رقم الهوية: <bdi>${esc(r.national_id||'لم يُسجل بعد')}</bdi><br>`:''}البرنامج: ${r.program?esc(r.program)+' ساعات':'لم يُحدد بعد'}<br>السداد: ${r.paid_on?esc(r.paid_on):'لم يُوثق بعد'}<br>الفاتورة: ${esc(r.payment_ref||'لم يُسجل بعد')}<br>الاعتماد: ${r.approved_at?date(r.approved_at):r.status==='paid'?'بانتظار مراجعة الإدارة':'بعد اكتمال التسجيل والسداد'}</div>`;
@@ -45,7 +68,7 @@ function show(id){current=data.referrals.find(r=>r.id===id);const r=current;let 
  if($('#registrationForm')){const f=$('#registrationForm');f.program.value=r.program||'6';f.status.value=r.status==='paid'?'paid':r.status==='waiting'?'waiting':'attended';f.paid_on.value=r.paid_on||'';f.payment_ref.value=r.payment_ref||'';f.onsubmit=e=>submitAction(e,'registration',f)}
  if($('#attendForm'))$('#attendForm').onsubmit=e=>submitAction(e,'attend',$('#attendForm'));
  if($('#correctForm'))$('#correctForm').onsubmit=e=>submitAction(e,'correct',$('#correctForm'));
- if($('#approve'))$('#approve').onclick=()=>run(async()=>{await rpc('approve',{id:r.id});await load();$('#detail').close();notice('تم اعتماد الإحالة وتحديث الرصيد.');});
+ if($('#approve'))$('#approve').onclick=()=>run(async()=>{await rpc('approve',{id:r.id});await load();$('#detail').close();notice('تم اعتماد الإحالة وتحديث الرصيد.');await processRewardMail(true);});
  if($('#audit'))$('#audit').onclick=()=>run(async()=>{const a=await rpc('audit',{id:r.id});$('#auditBody').innerHTML=a.map(renderAudit).join('')||'<p>لم تُسجل إجراءات بعد.</p>';});
 }
 
@@ -168,5 +191,5 @@ function staffDialog(id){
 }
 $('.appNav').onclick=e=>{const b=e.target.closest('[data-view]');if(b)run(()=>switchView(b.dataset.view));};
 $('#addStaff').onclick=()=>staffDialog();$('#reloadStaff').onclick=()=>run(reloadStaff);$('#staffSearch').oninput=renderStaff;
-$('#staffList').onclick=e=>{const edit=e.target.closest('[data-edit-staff]'),send=e.target.closest('[data-send-staff]');if(edit)staffDialog(edit.dataset.editStaff);const del=e.target.closest('[data-delete-staff]');if(del)run(async()=>{const p=staffRows.find(x=>x.id===del.dataset.deleteStaff);if(!confirm('حذف حساب '+p.name+'؟ سيُمنع تسجيل دخولها وتبقى إحالاتها محفوظة.'))return;const j=await staffApi('delete',{id:p.id});await reloadStaff();notice(j.message);});if(send)run(async()=>{const j=await staffApi('resend',{id:send.dataset.sendStaff});await reloadStaff();notice(j.message);});};
+$('#staffList').onclick=e=>{const edit=e.target.closest('[data-edit-staff]'),send=e.target.closest('[data-send-staff]');if(edit)staffDialog(edit.dataset.editStaff);const del=e.target.closest('[data-delete-staff]');if(del)run(async()=>{const p=staffRows.find(x=>x.id===del.dataset.deleteStaff);if(!confirm('حذف حساب '+p.name+'؟ سيُمنع الدخول وتحذف من عرض الأرصدة، وتبقى الإحالات للأرشفة.'))return;const j=await staffApi('delete',{id:p.id});await reloadStaff();await load();notice(j.message);});if(send)run(async()=>{const j=await staffApi('resend',{id:send.dataset.sendStaff});await reloadStaff();notice(j.message);});};
 run(initialize);
